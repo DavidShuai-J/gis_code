@@ -1,0 +1,371 @@
+---
+title: "Final accesssment"
+output: html_document
+---
+Load the required package first.
+```{r}
+library(tidyverse)
+library(osmdata)
+library(sf)
+library(ggmap)
+library(sf)
+library(tmap)
+library(dplyr)
+library(sp)
+library(spdep)
+library(tidyverse)
+library(fs)
+library(tidyr)
+library(broom)
+library(sjPlot)
+library(car)
+library(performance)
+library(AICcmodavg)
+library(spgwr)
+```
+
+
+## Load and pre-process the basic data
+
+The crime data should be downloaded from the google drive first and the url is https://drive.google.com/file/d/10yUW98X0oeMylk-PicIrGMCF-i85duxR/view?usp=sharing.
+
+```{r}
+
+#the population data
+pop <- read_csv("https://drive.google.com/u/0/uc?id=1FF10eLwS9qvCQNDA9FTUqgfPnPEEYEiq&export=download")%>%
+  filter(.,Year==2019)
+
+
+
+# read the london ward boundaries data
+dir.create("DATA")
+
+download.file("https://data.london.gov.uk/download/statistical-gis-boundary-files-london/9ba8c833-6370-4b11-abdc-314aa020d5e0/statistical-gis-boundaries-london.zip", 
+              destfile="DATA/statistical-gis-boundaries-london.zip")
+
+files<-dir_info(here::here("DATA")) %>%
+  dplyr::filter(str_detect(path, ".zip")) %>%
+  dplyr::select(path)%>%
+  pull()%>%
+  print()%>%
+  as.character()%>%
+  utils::unzip(exdir=here::here("DATA"))
+
+lonwards<-dir_info(here::here("DATA", 
+                                 "statistical-gis-boundaries-london", 
+                                 "ESRI"))%>%
+  dplyr::filter(str_detect(path, 
+                           "London_Ward_CityMerged.shp$"))%>%
+  dplyr::select(path)%>%
+  pull()
+
+#set the projection
+lonwards<- map(lonwards, st_read)%>%map(., crs=27700, st_transform)
+
+
+
+#Crime data
+
+crimes <- read.csv("all.csv")
+crimes$Longitude = as.numeric(crimes$Longitude)#change str ro num
+crimes$Latitude = as.numeric(crimes$Latitude)
+crime <- crimes[complete.cases(crimes[,5:6]),]# remove the NA rows
+
+crimes_lon <- crime[,] %>%
+  st_as_sf(., coords = c("Longitude", "Latitude"), 
+           crs = 4326)%>%
+  st_transform(., 27700) #projection
+
+crime_ward <- crimes_lon %>% st_join(lonwards[[1]],.)%>%add_count(GSS_CODE, name="num") %>%
+  dplyr::select(GSS_CODE, num)%>%
+  st_drop_geometry()%>%
+  distinct(GSS_CODE, num)%>%
+  left_join(lonwards[[1]], .,
+            by = c("GSS_CODE" = "GSS_CODE")) #contact to the spatial map
+
+#calculate the crime rate of wards
+crime_pop <- left_join(crime_ward, pop, by = c("GSS_CODE"="Code"))%>%
+  mutate(., crime_rate = (num/Population)*10000)%>%dplyr::select(c(1,2,6,7,8,12,14,17,18))
+
+```
+
+
+## download and pre-process the poi data
+
+```{r}
+#pubs
+pubs <- getbb("Greater London") %>%
+  opq() %>%
+  add_osm_feature("amenity", "pub")%>%osmdata_sf()
+
+#caculate the density of pubs in each ward of london
+pp<-pubs$osm_points%>%st_transform(.,crs=27700)%>%st_join(lonwards[[1]],.)%>%
+  dplyr::filter(.,  !is.na(.$osm_id))%>%   #get rid of the NA rows
+  add_count(GSS_CODE, name="num")%>%
+  dplyr::select(GSS_CODE, num)%>%
+  st_drop_geometry()%>%
+  distinct(GSS_CODE,num)%>% dplyr::rename(pub_num=num) %>% left_join(crime_pop, ., by = c("GSS_CODE"="GSS_CODE"))%>%
+  mutate(., pub_destiny = pub_num/Square_Kilometres)
+
+
+#alcohol shop
+shop <- getbb("Greater London") %>%
+  opq() %>%
+  add_osm_feature("shop", "alcohol")%>%osmdata_sf()
+
+
+#caculate the density of shops in each ward of london
+ap<-shop$osm_points%>%st_transform(.,crs=27700)%>%st_join(lonwards[[1]],.)%>%
+  dplyr::filter(.,  !is.na(.$osm_id))%>%   #get rid of the NA rows
+  add_count(GSS_CODE, name="num")%>%
+  dplyr::select(GSS_CODE, num)%>%
+  st_drop_geometry()%>%
+  distinct(GSS_CODE,num)%>% dplyr::rename(shop_num=num) %>% left_join(pp, ., by = c("GSS_CODE"="GSS_CODE"))%>%
+  mutate(., shop_destiny = shop_num/Square_Kilometres)
+
+
+
+#restaurant
+
+restaurant <- getbb("Greater London") %>%
+  opq() %>%
+  add_osm_feature("amenity", "restaurant")%>%osmdata_sf()
+
+#caculate the density of restaurants in each ward of london
+rp<-restaurant$osm_points%>%st_transform(.,crs=27700)%>%st_join(lonwards[[1]],.)%>%
+  dplyr::filter(.,  !is.na(.$osm_id))%>%
+  add_count(GSS_CODE, name="num")%>%
+  dplyr::select(GSS_CODE, num)%>%
+  st_drop_geometry()%>%
+  distinct(GSS_CODE,num)%>% dplyr::rename(rest_num=num) %>% left_join(ap, ., by = c("GSS_CODE"="GSS_CODE"))%>%
+  mutate(., rest_destiny = rest_num/Square_Kilometres)
+
+
+#nightclub
+
+
+nightclub <- getbb("Greater London") %>%
+  opq() %>%
+  add_osm_feature("amenity", "nightclub")%>%osmdata_sf()
+
+#caculate the density of nightclubs in each ward of london
+np<-nightclub$osm_points%>%st_transform(.,crs=27700)%>%st_join(lonwards[[1]],.)%>%
+  dplyr::filter(.,  !is.na(.$osm_id))%>%
+  add_count(GSS_CODE, name="num")%>%
+  dplyr::select(GSS_CODE, num)%>%
+  st_drop_geometry()%>%
+  distinct(GSS_CODE,num)%>% dplyr::rename(night_num=num) %>% left_join(rp, ., by = c("GSS_CODE"="GSS_CODE"))%>%
+  mutate(., night_destiny = night_num/Square_Kilometres)
+
+
+#bar
+bar <- getbb("Greater London") %>%
+  opq() %>%
+  add_osm_feature("amenity", "bar")%>%osmdata_sf()
+
+#caculate the density of bars in each ward of london
+ward_trans<-bar$osm_points%>%st_transform(.,crs=27700)%>%st_join(lonwards[[1]],.)%>%
+  dplyr::filter(.,  !is.na(.$osm_id))%>%
+  add_count(GSS_CODE, name="num")%>%
+  dplyr::select(GSS_CODE, num)%>%
+  st_drop_geometry()%>%
+  distinct(GSS_CODE,num)%>% dplyr::rename(bar_num=num) %>% left_join(np, ., by = c("GSS_CODE"="GSS_CODE"))%>%
+  mutate(., bar_destiny = bar_num/Square_Kilometres)
+
+#fill the NA with 0
+ward_trans[is.na(ward_trans)] <- 0
+
+```
+
+## fit the OLS model
+
+```{r}
+
+fit <- lm(crime_rate ~ rest_destiny+ bar_destiny + pub_destiny + night_destiny + shop_destiny, data = ward_trans)
+
+summary(fit)
+
+tab_model(fit, pred.labels = c("(Intercept)", "restaurants", "bars", "pubs","nightclubs","alcohol shops"), 
+          dv.labels = "Crime rate")
+
+vif(fit) #caculate the vif of variables
+
+AICc(fit) #get the aicc of model
+```
+
+##Monran'I test for residuals
+
+```{r}
+
+
+
+
+wards <- as(ward_trans, "Spatial")  #change to sp object
+#Then create a list of neighbours using the Queen criteria
+w <- poly2nb(wards, row.names=ward_trans$GSS_CODE)
+wm <- nb2mat(w, style='B')
+rwm <- mat2listw(wm, style='W')
+lm.morantest(fit, rwm, alternative="two.sided")
+```
+
+##GWR model
+
+```{r}
+#calculate the central point of ward
+coordsW <- ward_trans%>%
+  st_centroid()%>%
+  st_geometry()
+st_crs(coordsW) = 27700
+coordsWSP <- coordsW %>%
+  as(., "Spatial")
+
+#calculate the bandwidth
+
+GWRbandwidth <- gwr.sel(crime_rate~ rest_destiny+ bar_destiny + pub_destiny + night_destiny + shop_destiny, data = wards, 
+                         coords=coordsWSP,method = "AICc",
+                         adapt=T)
+
+gwr.model = gwr(crime_rate~  rest_destiny + bar_destiny + pub_destiny + night_destiny + shop_destiny, data = wards, 
+                 coords=coordsWSP, 
+                 adapt=GWRbandwidth, 
+                 hatmatrix=TRUE, 
+                 se.fit=TRUE)
+gwr.model
+```
+
+##map the GWR result
+
+```{r}
+
+results <- as.data.frame(gwr.model$SDF)
+
+#connect the coefficient to the original data
+ward_gwr <- ward_trans %>%
+  mutate(coef_rest= results$rest_destiny,
+         coef_shop = results$shop_destiny,
+         coef_pub = results$pub_destiny,
+         coef_bar = results$bar_destiny ,
+         coef_nightclub = results$night_destiny,
+         residualgwr=results$gwr.e)
+
+dfree<-gwr.model$results$edf #the degree freedom
+
+## map the shop result
+tm_shape(ward_gwr) +
+  tm_polygons(col = "coef_shop", auto.palette.mapping=FALSE,
+              border.alpha = 0.5, title = "coefficient estimated values",breaks=c(-210,-150,-50,0,50,150,200)) +
+  tm_scale_bar(text.size = 1, position = c("left", "bottom")) +
+  tm_credits("(a)", position=c(0,0.9), size=1.8)+
+  tm_compass(type = "4star", position = c("right", "top"))+tm_layout(frame=FALSE)+
+  tm_legend(position=c(0.8,0.00),legend.text.size=1)
+
+#T-test to calculate the p-value
+ward_trans$shop.t <- gwr.model$SDF$shop_destiny/gwr.model$SDF$shop_destiny_se
+ward_trans$shop.t.p<-2*pt(-abs(ward_trans$shop.t), dfree)
+
+breaks=c(0,0.01,0.05,0.1,1)
+tm_shape(ward_trans) +
+  tm_polygons(col = "shop.t.p",palette = "Reds", breaks=breaks,
+              border.alpha = 0.5, title = "Significant test",label=c('0-0.01','0.01-0.05','Negative','Insignificant')) +
+  tm_scale_bar(text.size = 1, position = c("left", "bottom")) +
+  tm_credits("(b)", position=c(0,0.9), size=1.8)+
+  tm_compass(type = "4star", position = c("right", "top"))+tm_layout(frame=FALSE)+
+  tm_legend(position=c(0.8,0.00),legend.text.size=1)
+
+##restaurant
+tm_shape(ward_gwr) +
+  tm_polygons(col = "coef_rest", auto.palette.mapping=FALSE,
+              border.alpha = 0.5, title = "coefficient estimated values") +
+  tm_scale_bar(text.size = 1, position = c("left", "bottom")) +
+  tm_credits("(a)", position=c(0,0.9), size=1.8)+
+  tm_compass(type = "4star", position = c("right", "top"))+tm_layout(frame=FALSE)+
+  tm_legend(position=c(0.8,0.00),legend.text.size=1)
+
+ward_trans$rest.t <- gwr.model$SDF$rest_destiny/gwr.model$SDF$rest_destiny_se
+ward_trans$rest.t.p<-2*pt(-abs(ward_trans$rest.t), dfree)
+
+breaks=c(0,0.01,0.05,0.1,1)
+tm_shape(ward_trans) +
+  tm_polygons(col = "rest.t.p",palette = "Reds", breaks=breaks,
+              border.alpha = 0.5, title = "Significant test",label=c('0-0.01','0.01-0.05','Negative','Insignificant')) +
+  tm_scale_bar(text.size = 1, position = c("left", "bottom")) +
+  tm_credits("(b)", position=c(0,0.9), size=1.8)+
+  tm_compass(type = "4star", position = c("right", "top"))+tm_layout(frame=FALSE)+
+  tm_legend(position=c(0.8,0.00),legend.text.size=1)
+
+##bars
+
+tm_shape(ward_gwr) +
+  tm_polygons(col = "coef_bar", auto.palette.mapping=FALSE,
+              border.alpha = 0.5, title = "coefficient estimated values",breaks=c(-100,-60,-30,0,30,150,200)) +
+  tm_scale_bar(text.size = 1, position = c("left", "bottom")) +
+  tm_credits("(a)", position=c(0,0.9), size=1.8)+
+  tm_compass(type = "4star", position = c("right", "top"))+tm_layout(frame=FALSE)+
+  tm_legend(position=c(0.8,0.00),legend.text.size=1)
+
+ward_trans$bar.t <- gwr.model$SDF$bar_destiny/gwr.model$SDF$bar_destiny_se
+ward_trans$bar.t.p<-2*pt(-abs(ward_trans$bar.t), dfree)
+
+breaks=c(0,0.01,0.05,0.1,1)
+tm_shape(ward_trans) +
+  tm_polygons(col = "bar.t.p",palette = "Reds", breaks=breaks,
+              border.alpha = 0.5, title = "Significant test",label=c('0-0.01','0.01-0.05','Negative','Insignificant')) +
+  tm_scale_bar(text.size = 1, position = c("left", "bottom")) +
+  tm_credits("(b)", position=c(0,0.9), size=1.8)+
+  tm_compass(type = "4star", position = c("right", "top"))+tm_layout(frame=FALSE)+
+  tm_legend(position=c(0.8,0.00),legend.text.size=1)
+
+
+##pubs
+
+tm_shape(ward_gwr) +
+  tm_polygons(col = "coef_pub", auto.palette.mapping=FALSE,
+              border.alpha = 0.5, title = "coefficient estimated values") +
+  tm_scale_bar(text.size = 1, position = c("left", "bottom")) +
+  tm_credits("(a)", position=c(0,0.9), size=1.8)+
+  tm_compass(type = "4star", position = c("right", "top"))+tm_layout(frame=FALSE)+
+  tm_legend(position=c(0.8,0.00),legend.text.size=1)
+
+ward_trans$pub.t <- gwr.model$SDF$pub_destiny/gwr.model$SDF$pub_destiny_se
+ward_trans$pub.t.p<-2*pt(-abs(ward_trans$pub.t), dfree)
+
+breaks=c(0,0.01,0.05,0.1,1)
+tm_shape(ward_trans) +
+  tm_polygons(col = "pub.t.p",palette = "Reds", breaks=breaks,
+              border.alpha = 0.5, title = "Significant test",label=c('0-0.01','0.01-0.05','Negative','Insignificant')) +
+  tm_scale_bar(text.size = 1, position = c("left", "bottom")) +
+  tm_credits("(b)", position=c(0,0.9), size=1.8)+
+  tm_compass(type = "4star", position = c("right", "top"))+tm_layout(frame=FALSE)+
+  tm_legend(position=c(0.8,0.00),legend.text.size=1)
+
+
+##nightclub
+
+tm_shape(ward_gwr) +
+  tm_polygons(col = "coef_nightclub", auto.palette.mapping=FALSE,
+              border.alpha = 0.5, title = "coefficient estimated values", breaks=c(-100,0,300,500,1000,2000,2500)) +
+  tm_scale_bar(text.size = 1, position = c("left", "bottom")) +
+  tm_credits("(a)", position=c(0,0.9), size=1.8)+
+  tm_compass(type = "4star", position = c("right", "top"))+tm_layout(frame=FALSE)+
+  tm_legend(position=c(0.8,0.00),legend.text.size=1)
+
+ward_trans$night.t <- gwr.model$SDF$night_destiny/gwr.model$SDF$night_destiny_se
+ward_trans$night.t.p<-2*pt(-abs(ward_trans$night.t), dfree)
+
+breaks=c(0,0.01,0.05,0.1,1)
+tm_shape(ward_trans) +
+  tm_polygons(col = "night.t.p",palette = "Reds", breaks=breaks,
+              border.alpha = 0.5, title = "Significant test",label=c('0-0.01','0.01-0.05','Negative','Insignificant')) +
+  tm_scale_bar(text.size = 1, position = c("left", "bottom")) +
+  tm_credits("(b)", position=c(0,0.9), size=1.8)+
+  tm_compass(type = "4star", position = c("right", "top"))+tm_layout(frame=FALSE)+
+  tm_legend(position=c(0.8,0.00),legend.text.size=1)
+```
+
+
+
+
+
+
+
+
